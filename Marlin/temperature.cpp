@@ -488,7 +488,7 @@ static float analog2temp(int raw, uint8_t e) {
       SERIAL_ERRORLNPGM(" - Invalid extruder number !");
       kill();
   } 
-  #ifdef HEATER_0_USES_MAX6675
+  #ifdef HEATER_0_USES_MAX6675 || HEATER_0_USES_MAX31855
     if (e == 0)
     {
       return 0.25 * raw;
@@ -607,7 +607,7 @@ void tp_init()
 	#endif
   #endif  
 
-  #ifdef HEATER_0_USES_MAX6675
+  #ifdef HEATER_0_USES_MAX6675 || HEATER_0_USES_MAX31855
     #ifndef SDSUPPORT
       SET_OUTPUT(MAX_SCK_PIN);
       WRITE(MAX_SCK_PIN,0);
@@ -619,8 +619,13 @@ void tp_init()
       WRITE(MAX_MISO_PIN,1);
     #endif
     
+	#ifdef HEATER_0_USES_MAX6675
     SET_OUTPUT(MAX6675_SS);
     WRITE(MAX6675_SS,1);
+	#else
+	SET_OUTPUT(MAX31855_SS);
+    WRITE(MAX31855_SS,1);
+	#endif
   #endif
 
   // Set analog inputs
@@ -900,6 +905,63 @@ int read_max6675()
 }
 #endif
 
+#ifdef HEATER_0_USES_MAX31855
+#define MAX31855_HEAT_INTERVAL 120
+long max31855_previous_millis = -HEAT_INTERVAL;
+long max31855_temp = 2000;
+
+int read_max31855()
+{
+  if (millis() - max31855_previous_millis < MAX31855_HEAT_INTERVAL) 
+    return max31855_temp;
+  
+  max31855_previous_millis = millis();
+  max31855_temp = 0L;
+    
+  #ifdef	PRR
+    PRR &= ~(1<<PRSPI);
+  #elif defined PRR0
+    PRR0 &= ~(1<<PRSPI);
+  #endif
+  
+  SPCR = (1<<MSTR) | (1<<SPE) | (1<<SPR0);
+  
+  // enable TT_MAX31855
+  WRITE(MAX31855_SS, 0);
+  
+  // ensure 100ns delay - a bit extra is fine
+  asm("nop");//50ns on 20Mhz, 62.5ns on 16Mhz
+  asm("nop");//50ns on 20Mhz, 62.5ns on 16Mhz
+  
+  // read MAX31855
+  for(int i = 0; i < 4; i++)
+  {
+	max31855_temp <<= 8;
+	SPDR = 0;
+	for (;(SPSR & (1<<SPIF)) == 0;);
+	max31855_temp |= SPDR;
+  }
+  
+  // disable TT_MAX31855
+  WRITE(MAX31855_SS, 1);
+
+  // validity tests
+  if (max31855_temp & 0x3000F) 
+  {
+    if(max31855_temp == 0x00000000 || max31855_temp == 0xFFFFFFFF) max31855_temp = 2016; // transmission error
+    else if(max31855_temp & 0x04) max31855_temp = 2012; // short to power
+    else if(max31855_temp & 0x02) max31855_temp = 2008; // short to ground
+    else if(max31855_temp & 0x01) max31855_temp = 2004; // no thermocouple
+    else max31855_temp = 2000; // general fault
+  }
+  else
+  {
+    max31855_temp >>= 18;
+  }
+  return int(max31855_temp);
+}
+#endif
+
 
 // Timer 0 is shared with millies
 ISR(TIMER0_COMPB_vect)
@@ -980,6 +1042,8 @@ ISR(TIMER0_COMPB_vect)
       #endif
       #ifdef HEATER_0_USES_MAX6675 // TODO remove the blocking
         raw_temp_0_value = read_max6675();
+	  #elif HEATER_0_USES_MAX31855
+		raw_temp_0_value = read_max31855();
       #endif
       temp_state = 2;
       break;
